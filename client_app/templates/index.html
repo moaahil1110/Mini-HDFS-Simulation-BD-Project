@@ -83,20 +83,23 @@
     }
 
     /* === Buttons & Inputs === */
-    button {
+    button, .btn {
       background: linear-gradient(90deg, var(--accent-blue), var(--accent-purple));
       border: none;
-      padding: 8px 16px;
+      padding: 8px 14px;
       color: white;
       font-weight: bold;
       border-radius: 8px;
       cursor: pointer;
       transition: opacity var(--transition-fast), transform var(--transition-fast);
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
     }
 
-    button:hover {
-      opacity: 0.8;
-      transform: scale(1.05);
+    button:hover, .btn:hover {
+      opacity: 0.9;
+      transform: scale(1.03);
     }
 
     input[type="file"] {
@@ -184,6 +187,66 @@
       color: var(--accent-green);
     }
 
+    /* Collapsible section styles */
+    .collapsible {
+      border-radius: 10px;
+      overflow: hidden;
+      background: linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01));
+      margin-top: 10px;
+      border: 1px solid rgba(255,255,255,0.03);
+    }
+
+    .collapsible-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 8px 12px;
+      cursor: pointer;
+      user-select: none;
+    }
+
+    .collapsible-title {
+      font-weight: 700;
+      color: var(--accent-blue);
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .collapsible-toggle {
+      background: transparent;
+      border-radius: 8px;
+      padding: 6px 10px;
+      border: 1px solid rgba(255,255,255,0.04);
+      color: var(--text-light);
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .collapsible-content {
+      max-height: 0;
+      overflow: hidden;
+      transition: max-height 0.35s cubic-bezier(.2,.9,.2,1);
+      padding: 0 12px;
+    }
+
+    .collapsible.expanded .collapsible-content {
+      max-height: 900px; /* large enough to hold table; animated */
+      padding-bottom: 12px;
+      padding-top: 8px;
+    }
+
+    .toggle-arrow {
+      display: inline-block;
+      transition: transform 0.25s ease;
+    }
+
+    .collapsible.expanded .toggle-arrow {
+      transform: rotate(90deg);
+    }
+
     @keyframes pulseGlow {
       0% { text-shadow: 0 0 8px rgba(0, 180, 216, 0.5); }
       50% { text-shadow: 0 0 20px rgba(0, 180, 216, 0.9); }
@@ -221,16 +284,32 @@
     </div>
 
     <div class="card col">
-      <h3>🧱 Chunk Map</h3>
-      <table>
-        <thead><tr><th>File</th><th>Chunk ID</th><th>Index</th><th>Primary</th><th>Replica</th><th>Stored On</th><th>Checksum</th><th>State</th></tr></thead>
-        <tbody id="chunkmap"></tbody>
-      </table>
-      <h4 style="color:var(--accent-purple)">⚠ Under-replicated</h4>
-      <table>
-        <thead><tr><th>Chunk ID</th><th>Missing On</th></tr></thead>
-        <tbody id="underrep"></tbody>
-      </table>
+      <!-- Collapsible chunk map -->
+      <div class="collapsible" id="chunkCollapsible">
+        <div class="collapsible-header" id="chunkHeader" role="button" aria-expanded="true" tabindex="0">
+          <div class="collapsible-title">🧱 Chunk Map</div>
+          <div>
+            <button class="collapsible-toggle" id="chunkToggle" aria-controls="chunkContent" aria-expanded="true">
+              <span class="toggle-arrow">▶</span>
+              <span id="chunkToggleText">Collapse</span>
+            </button>
+          </div>
+        </div>
+
+        <div class="collapsible-content" id="chunkContent" aria-hidden="false">
+          <table>
+            <thead><tr><th>File</th><th>Chunk ID</th><th>Index</th><th>Primary</th><th>Replica</th><th>Stored On</th><th>Checksum</th><th>State</th></tr></thead>
+            <tbody id="chunkmap"></tbody>
+          </table>
+
+          <h4 style="color:var(--accent-purple); margin-top:10px;">⚠ Under-replicated</h4>
+          <table>
+            <thead><tr><th>Chunk ID</th><th>Missing On</th></tr></thead>
+            <tbody id="underrep"></tbody>
+          </table>
+        </div>
+      </div>
+      <!-- end collapsible -->
     </div>
   </div>
 
@@ -245,69 +324,81 @@
   </div>
 
 <script>
+/* Helper to fetch JSON */
 async function fetchJSON(url){ const r = await fetch(url); return r.json(); }
 
+/* Refresh dashboard data */
 async function refresh(){
-  const st = await fetchJSON('/api/status');
-  const d = st.datanode_health || {};
-  const dnEl = document.getElementById('datanodes');
-  dnEl.innerHTML = '';
-  for (const [k,v] of Object.entries(d)){
-    const age = v.last_heartbeat ? (Date.now()/1000 - v.last_heartbeat).toFixed(1) : 'n/a';
-    const cls = v.status === 'alive' ? 'ok' : 'dead';
-    dnEl.innerHTML += `<div><strong>${k}</strong>: <span class="${cls}">${v.status}</span> (last: ${age}s)</div>`;
-  }
-  document.getElementById('meta').textContent = JSON.stringify(st.metadata, null, 2);
+  try {
+    const st = await fetchJSON('/api/status');
+    const d = st.datanode_health || {};
+    const dnEl = document.getElementById('datanodes');
+    dnEl.innerHTML = '';
+    for (const [k,v] of Object.entries(d)){
+      const age = v.last_heartbeat ? (Date.now()/1000 - v.last_heartbeat).toFixed(1) : 'n/a';
+      const cls = v.status === 'alive' ? 'ok' : 'dead';
+      dnEl.innerHTML += `<div><strong>${k}</strong>: <span class="${cls}">${v.status}</span> (last: ${age}s)</div>`;
+    }
+    document.getElementById('meta').textContent = JSON.stringify(st.metadata, null, 2);
 
-  const cm = document.getElementById('chunkmap');
-  const ur = document.getElementById('underrep');
-  cm.innerHTML = ''; ur.innerHTML = '';
-  if (st.metadata) {
-    for (const [fname, info] of Object.entries(st.metadata)) {
-      for (const ci of info.chunks || []) {
-        const stored = ci.stored_on || [];
-        const primary = ci.primary_datanode || '';
-        const replica = ci.replica_datanode || '';
-        const expected = [primary, replica].filter(Boolean);
-        const missing = expected.filter(x => !stored.includes(x));
-        const state = missing.length === 0 ? '<span class="ok">healthy</span>' : `<span class="dead">under-replicated</span>`;
-        const tr = document.createElement('tr');
-        tr.innerHTML = `<td>${fname}</td><td>${ci.chunk_id}</td><td>${ci.chunk_index}</td><td>${primary}</td><td>${replica}</td><td>${stored.join(', ')}</td><td>${ci.checksum||''}</td><td>${state}</td>`;
-        cm.appendChild(tr);
-        if (missing.length > 0) {
-          const tr2 = document.createElement('tr');
-          tr2.innerHTML = `<td>${ci.chunk_id}</td><td>${missing.join(', ')}</td>`;
-          ur.appendChild(tr2);
+    // populate chunk map
+    const cm = document.getElementById('chunkmap');
+    const ur = document.getElementById('underrep');
+    cm.innerHTML = ''; ur.innerHTML = '';
+    if (st.metadata) {
+      for (const [fname, info] of Object.entries(st.metadata)) {
+        for (const ci of info.chunks || []) {
+          const stored = ci.stored_on || [];
+          const primary = ci.primary_datanode || '';
+          const replica = ci.replica_datanode || '';
+          const expected = [primary, replica].filter(Boolean);
+          const missing = expected.filter(x => !stored.includes(x));
+          const state = missing.length === 0 ? '<span class="ok">healthy</span>' : `<span class="dead">under-replicated</span>`;
+          const tr = document.createElement('tr');
+          tr.innerHTML = `<td>${fname}</td><td>${ci.chunk_id}</td><td>${ci.chunk_index}</td><td>${primary}</td><td>${replica}</td><td>${stored.join(', ')}</td><td>${ci.checksum||''}</td><td>${state}</td>`;
+          cm.appendChild(tr);
+          if (missing.length > 0) {
+            const tr2 = document.createElement('tr');
+            tr2.innerHTML = `<td>${ci.chunk_id}</td><td>${missing.join(', ')}</td>`;
+            ur.appendChild(tr2);
+          }
         }
       }
     }
+
+    // alerts
+    const alertsEl = document.getElementById('alerts');
+    alertsEl.innerHTML = '';
+    (st.alerts || []).slice().reverse().forEach(a => {
+      const d = document.createElement('div');
+      const t = a.time || new Date().toISOString();
+      const who = a.chunk_id ? `Chunk ${a.chunk_id}` : '';
+      const msg = a.issue || a.error || a.message || JSON.stringify(a);
+      d.innerHTML = `<strong>${t}</strong> &nbsp; <em>${who}</em> &nbsp; - ${msg}`;
+      alertsEl.appendChild(d);
+    });
+
+    // files
+    const files = await fetchJSON('/api/files');
+    const tbody = document.getElementById('files');
+    tbody.innerHTML = '';
+    (files.files || []).forEach(name => {
+      const meta = st.metadata && st.metadata[name] || {file_size: '?', chunks: []};
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td>${name}</td><td>${meta.file_size}</td><td>${meta.chunks.length}</td>
+      <td><button data-fn="${name}">Download</button></td>`;
+      tbody.appendChild(tr);
+    });
+  } catch (err) {
+    console.error('refresh error', err);
   }
-
-  const alertsEl = document.getElementById('alerts');
-  alertsEl.innerHTML = '';
-  (st.alerts || []).slice().reverse().forEach(a => {
-    const d = document.createElement('div');
-    const t = a.time || new Date().toISOString();
-    const who = a.chunk_id ? `Chunk ${a.chunk_id}` : '';
-    const msg = a.issue || a.error || a.message || JSON.stringify(a);
-    d.innerHTML = `<strong>${t}</strong> &nbsp; <em>${who}</em> &nbsp; - ${msg}`;
-    alertsEl.appendChild(d);
-  });
-
-  const files = await fetchJSON('/api/files');
-  const tbody = document.getElementById('files');
-  tbody.innerHTML = '';
-  (files.files || []).forEach(name => {
-    const meta = st.metadata && st.metadata[name] || {file_size: '?', chunks: []};
-    const tr = document.createElement('tr');
-    tr.innerHTML = `<td>${name}</td><td>${meta.file_size}</td><td>${meta.chunks.length}</td>
-    <td><button data-fn="${name}">Download</button></td>`;
-    tbody.appendChild(tr);
-  });
 }
 
-setInterval(refresh, 3000); refresh();
+/* Polling */
+setInterval(refresh, 3000);
+refresh();
 
+/* File download click handler */
 document.getElementById('files').addEventListener('click', async (e)=>{
   const btn = e.target.closest('button');
   if(!btn) return;
@@ -317,6 +408,7 @@ document.getElementById('files').addEventListener('click', async (e)=>{
   a.click();
 });
 
+/* Upload form */
 document.getElementById('uploadForm').addEventListener('submit', async (e)=>{
   e.preventDefault();
   const form = e.target;
@@ -332,6 +424,35 @@ document.getElementById('uploadForm').addEventListener('submit', async (e)=>{
   }
   refresh();
 });
+
+/* Collapsible chunk map logic */
+const chunkCollapsible = document.getElementById('chunkCollapsible');
+const chunkHeader = document.getElementById('chunkHeader');
+const chunkToggle = document.getElementById('chunkToggle');
+const chunkToggleText = document.getElementById('chunkToggleText');
+const chunkContent = document.getElementById('chunkContent');
+
+function setExpanded(expanded) {
+  if (expanded) {
+    chunkCollapsible.classList.add('expanded');
+    chunkHeader.setAttribute('aria-expanded', 'true');
+    chunkToggle.setAttribute('aria-expanded', 'true');
+    chunkContent.setAttribute('aria-hidden', 'false');
+    chunkToggleText.textContent = 'Collapse';
+  } else {
+    chunkCollapsible.classList.remove('expanded');
+    chunkHeader.setAttribute('aria-expanded', 'false');
+    chunkToggle.setAttribute('aria-expanded', 'false');
+    chunkContent.setAttribute('aria-hidden', 'true');
+    chunkToggleText.textContent = 'Expand';
+  }
+}
+
+/* default expanded */
+setExpanded(true);
+
+chunkHeader.addEventListener('click', ()=> setExpanded(!chunkCollapsible.classList.contains('expanded')));
+chunkHeader.addEventListener('keypress', (e)=> { if(e.key === 'Enter' || e.key === ' ') { setExpanded(!chunkCollapsible.classList.contains('expanded')); e.preventDefault(); }});
 </script>
 </body>
 </html>
