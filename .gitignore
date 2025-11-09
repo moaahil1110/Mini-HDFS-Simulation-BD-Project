@@ -41,3 +41,7 @@ Thumbs.db
 *.log
 logs/
 context.md
+
+# Context and development files
+*.tmp
+*.temp
