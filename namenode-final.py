@@ -77,6 +77,8 @@ class Namenode:
         threading.Thread(target=self.monitor_health, daemon=True).start()
         # Replication worker
         threading.Thread(target=self._replication_worker, daemon=True).start()
+        # Periodic replication health check
+        threading.Thread(target=self.periodic_replication_check, daemon=True).start()
 
         # RPC server for client requests
         self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -162,8 +164,70 @@ class Namenode:
                     if last and now - last > config.HEARTBEAT_TIMEOUT:
                         if health['status'] != 'dead':
                             logger.warning(f"Detected datanode {dnid} as dead (last heartbeat {now-last:.1f}s ago)")
-                        health['status'] = 'dead'
-                        health['was_dead'] = True
+                            health['status'] = 'dead'
+                            health['was_dead'] = True
+                            # Trigger immediate re-replication for chunks that lost their replica
+                            threading.Thread(target=self.handle_node_failure, args=(dnid,), daemon=True).start()
+                        else:
+                            health['status'] = 'dead'
+                            health['was_dead'] = True
+
+    def handle_node_failure(self, dead_dnid):
+        """Handle immediate re-replication when a datanode fails."""
+        logger.info(f"Handling failure of {dead_dnid} - checking for chunks that need re-replication")
+        
+        with self.lock:
+            failed_chunks = []
+            for fname, info in self.metadata.items():
+                for ci in info['chunks']:
+                    chunk_id = ci['chunk_id']
+                    stored = ci.get('stored_on', [])
+                    
+                    # Check if this chunk is stored on the dead node
+                    if dead_dnid in stored:
+                        # Find alive nodes that should have this chunk
+                        expected_replicas = [ci['primary_datanode'], ci['replica_datanode']]
+                        
+                        # Find which replicas are still alive
+                        alive_replicas = []
+                        for replica in expected_replicas:
+                            if replica != dead_dnid and replica in self.datanode_health:
+                                if self.datanode_health[replica]['status'] == 'alive':
+                                    alive_replicas.append(replica)
+                        
+                        # If we have at least one alive replica, find a target for re-replication
+                        if len(alive_replicas) >= 1:
+                            # Use the other expected replica as target if it's alive, otherwise use the alive replica
+                            target = None
+                            for expected in expected_replicas:
+                                if expected != dead_dnid and expected not in stored and expected in self.datanode_health:
+                                    if self.datanode_health[expected]['status'] == 'alive':
+                                        target = expected
+                                        break
+                            
+                            # If target is not the expected replica, pick any alive node that's not the source
+                            if not target:
+                                for replica in alive_replicas:
+                                    if replica not in stored:
+                                        target = replica
+                                        break
+                            
+                            if target:
+                                # Use the first alive replica as source
+                                source = alive_replicas[0]
+                                failed_chunks.append({
+                                    'chunk_id': chunk_id,
+                                    'source': source,
+                                    'target': target,
+                                    'reason': f'primary_replica_{dead_dnid}_failed'
+                                })
+                                logger.info(f"Chunk {chunk_id} lost replica on {dead_dnid}, will re-replicate from {source} to {target}")
+        
+        # Enqueue replication tasks for all failed chunks
+        for task in failed_chunks:
+            self.enqueue_replication(task['chunk_id'], task['source'], task['target'])
+        
+        logger.info(f"Enqueued {len(failed_chunks)} chunks for re-replication after {dead_dnid} failure")
 
     # ---------- client RPC handlers ----------
     def handle_client(self, client_socket):
@@ -397,10 +461,23 @@ class Namenode:
                 if ack.get('status') != 'success':
                     raise RuntimeError(f"Target {target} failed to store {chunk_id}: {ack}")
 
-                logger.info(f"Replication of {chunk_id} to {target} succeeded")
+                logger.info(f"RE-REPLICATION SUCCESS: Chunk {chunk_id} replicated from {source} to {target}")
                 success = True
+                
+                # Update metadata to reflect that target now has the chunk
+                with self.lock:
+                    for fname, info in self.metadata.items():
+                        for ci in info['chunks']:
+                            if ci['chunk_id'] == chunk_id:
+                                stored = ci.get('stored_on', [])
+                                if target not in stored:
+                                    stored.append(target)
+                                    ci['stored_on'] = stored
+                                    logger.info(f"Updated metadata: {chunk_id} now stored on {stored}")
+                                self.save_metadata()
+                                break
             except Exception as e:
-                logger.warning(f"Replication task failed for {chunk_id} -> {target}: {e}")
+                logger.warning(f"RE-REPLICATION FAILED: Chunk {chunk_id} from {source} to {target}: {e}")
                 success = False
 
             if not success:
@@ -422,7 +499,7 @@ class Namenode:
     # ---------- replication helpers ----------
     def rebuild_for_node(self, target_dnid):
         """When a datanode comes back, enqueue replication tasks to ensure chunks are restored onto it."""
-        logger.info(f"Scheduling rebuild for {target_dnid}")
+        logger.info(f"Scheduling rebuild for {target_dnid} - restoring all missing chunks")
 
         # Wait a short time to allow any late report_chunk RPCs to arrive and be persisted.
         try:
@@ -445,7 +522,7 @@ class Namenode:
                             continue
                         to_replicate.append({'chunk_id': ci['chunk_id'], 'chunk_meta': ci})
 
-        logger.info(f"Found {len(to_replicate)} chunks to consider for rebuild on {target_dnid}")
+        logger.info(f"Found {len(to_replicate)} chunks to rebuild on {target_dnid}")
 
         for item in to_replicate:
             chunk_id = item['chunk_id']
@@ -469,8 +546,64 @@ class Namenode:
                 logger.warning(f"No known source (per metadata.stored_on) for {chunk_id}; skipping enqueue")
                 continue
 
-            logger.info(f"Enqueue replication of {chunk_id} from {source} to {target_dnid}")
+            logger.info(f"Rebuilding chunk {chunk_id} from {source} to {target_dnid} (expected replica location)")
             self.enqueue_replication(chunk_id, source, target_dnid)
+        
+        logger.info(f"Rebuild complete: enqueued {len(to_replicate)} chunks for {target_dnid}")
+
+    def periodic_replication_check(self):
+        """Periodically check replication status and fix under-replicated chunks."""
+        logger.info("Starting periodic replication health check")
+        
+        while True:
+            try:
+                time.sleep(30)  # Check every 30 seconds
+                logger.info("Running periodic replication health check")
+                
+                with self.lock:
+                    under_replicated = []
+                    for fname, info in self.metadata.items():
+                        for ci in info['chunks']:
+                            chunk_id = ci['chunk_id']
+                            stored = ci.get('stored_on', [])
+                            
+                            # Check if chunk has proper replication (should be on 2 datanodes)
+                            if len(stored) < 2:
+                                # Find missing replicas
+                                expected_replicas = [ci['primary_datanode'], ci['replica_datanode']]
+                                missing_replicas = []
+                                
+                                for expected in expected_replicas:
+                                    if expected not in stored:
+                                        # Check if the expected node is alive
+                                        if expected in self.datanode_health:
+                                            if self.datanode_health[expected]['status'] == 'alive':
+                                                missing_replicas.append(expected)
+                                
+                                # If we have sources and missing replicas, schedule re-replication
+                                if stored and missing_replicas:
+                                    for target in missing_replicas:
+                                        source = stored[0]  # Use first available replica as source
+                                        under_replicated.append({
+                                            'chunk_id': chunk_id,
+                                            'source': source,
+                                            'target': target,
+                                            'reason': 'under_replicated'
+                                        })
+                                        logger.info(f"Chunk {chunk_id} under-replicated ({len(stored)}/2 replicas), will re-replicate from {source} to {target}")
+                
+                # Enqueue replication tasks
+                for task in under_replicated:
+                    self.enqueue_replication(task['chunk_id'], task['source'], task['target'])
+                
+                if under_replicated:
+                    logger.info(f"Periodic check: enqueued {len(under_replicated)} chunks for re-replication")
+                else:
+                    logger.info("Periodic check: all chunks properly replicated")
+                    
+            except Exception as e:
+                logger.exception(f"Error in periodic replication check: {e}")
+                time.sleep(30)
 
 if __name__ == '__main__':
     nn = Namenode()
