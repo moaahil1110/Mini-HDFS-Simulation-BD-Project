@@ -1,0 +1,98 @@
+{
+  "test_4mb.bin": {
+    "chunks": [
+      {
+        "chunk_id": "test_4mb.binchunk0",
+        "chunk_index": 0,
+        "primary_datanode": "datanode0",
+        "replica_datanode": "datanode1",
+        "checksum": "985582fac78355e2a3b358df1209ed70",
+        "stored_on": [
+          "datanode1",
+          "datanode0"
+        ]
+      },
+      {
+        "chunk_id": "test_4mb.binchunk1",
+        "chunk_index": 1,
+        "primary_datanode": "datanode1",
+        "replica_datanode": "datanode0",
+        "checksum": "4332e2819b59a5515ce9bb2b2d688a34",
+        "stored_on": [
+          "datanode1",
+          "datanode0"
+        ]
+      }
+    ],
+    "file_size": 4194304,
+    "upload_time": "2025-11-09T06:53:11.584989"
+  },
+  "datanode0.log": {
+    "chunks": [
+      {
+        "chunk_id": "datanode0.logchunk0",
+        "chunk_index": 0,
+        "primary_datanode": "datanode0",
+        "replica_datanode": "datanode1",
+        "checksum": "f71df426fb351902a92a8fde4fd7052b",
+        "stored_on": [
+          "datanode0",
+          "datanode1"
+        ]
+      }
+    ],
+    "file_size": 14536,
+    "upload_time": "2025-11-09T06:39:36.691368"
+  },
+  "fuss.txt": {
+    "chunks": [
+      {
+        "chunk_id": "fuss.txtchunk0",
+        "chunk_index": 0,
+        "primary_datanode": "datanode0",
+        "replica_datanode": "datanode1",
+        "checksum": "bcc50e1e4276f844d34aebf3aed08438",
+        "stored_on": [
+          "datanode0",
+          "datanode1"
+        ]
+      }
+    ],
+    "file_size": 10,
+    "upload_time": "2025-11-09T06:54:18.979502"
+  },
+  "thook.bin": {
+    "chunks": [
+      {
+        "chunk_id": "thook.binchunk0",
+        "chunk_index": 0,
+        "primary_datanode": "datanode0",
+        "replica_datanode": "datanode1",
+        "checksum": "1a10e32390a67f6fab3fc530d5499f32",
+        "stored_on": [
+          "datanode0",
+          "datanode1"
+        ]
+      }
+    ],
+    "file_size": 5574,
+    "upload_time": "2025-11-09T06:58:32.213504"
+  },
+  "aahil_cutie.txt": {
+    "chunks": [
+      {
+        "chunk_id": "aahil_cutie.txtchunk0",
+        "chunk_index": 0,
+        "primary_datanode": "datanode0",
+        "replica_datanode": "datanode1",
+        "checksum": "c6deabfe431dda71963806d994fa58bc",
+        "stored_on": [
+          "datanode0",
+          "datanode1"
+        ]
+      }
+    ],
+    "file_size": 30,
+    "upload_time": "2025-11-09T14:08:47.366650"
+  }
+}
