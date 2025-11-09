@@ -1,0 +1,458 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Mini-HDFS Dashboard</title>
+  <style>
+    /* ==== Global Dark Neon Theme ==== */
+    :root {
+      --bg-dark: #0e0e10;
+      --card-dark: #1a1b1e;
+      --accent-blue: #00b4d8;
+      --accent-green: #00ff9f;
+      --accent-purple: #8a2be2;
+      --text-light: #eaeaea;
+      --text-dim: #9a9a9a;
+      --border-glow: 0 0 10px rgba(0, 180, 216, 0.4);
+      --transition-fast: 0.2s ease-in-out;
+    }
+
+    body {
+      background: var(--bg-dark);
+      color: var(--text-light);
+      font-family: 'Segoe UI', Roboto, sans-serif;
+      margin: 24px;
+      line-height: 1.5;
+    }
+
+    h1 {
+      text-align: center;
+      color: var(--accent-blue);
+      text-shadow: 0 0 15px rgba(0, 180, 216, 0.8);
+      letter-spacing: 1px;
+      animation: pulseGlow 2.5s infinite alternate;
+    }
+
+    .card {
+      background: var(--card-dark);
+      border-radius: 14px;
+      padding: 20px;
+      margin-bottom: 20px;
+      box-shadow: var(--border-glow);
+      transition: transform var(--transition-fast);
+    }
+
+    .card:hover {
+      transform: translateY(-3px);
+    }
+
+    /* === Fixed layout for better fit === */
+    .row {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-evenly;
+      align-items: flex-start;
+      gap: 24px;
+      margin-top: 10px;
+    }
+
+    .col {
+      flex: 1 1 350px;
+      min-width: 340px;
+      max-width: 600px;
+      display: flex;
+      flex-direction: column;
+      justify-content: flex-start;
+    }
+
+    /* Scroll for large tables */
+    .card table {
+      display: block;
+      overflow-x: auto;
+      max-height: 400px;
+      overflow-y: auto;
+      border-radius: 10px;
+    }
+
+    @media (max-width: 1200px) {
+      .col {
+        flex: 1 1 100%;
+        max-width: 100%;
+      }
+    }
+
+    /* === Buttons & Inputs === */
+    button, .btn {
+      background: linear-gradient(90deg, var(--accent-blue), var(--accent-purple));
+      border: none;
+      padding: 8px 14px;
+      color: white;
+      font-weight: bold;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: opacity var(--transition-fast), transform var(--transition-fast);
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    button:hover, .btn:hover {
+      opacity: 0.9;
+      transform: scale(1.03);
+    }
+
+    input[type="file"] {
+      color: var(--text-light);
+      background: var(--card-dark);
+      border: 1px solid var(--accent-blue);
+      border-radius: 6px;
+      padding: 6px;
+      margin-right: 10px;
+    }
+
+    /* === Tables === */
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      color: var(--text-light);
+      font-size: 14px;
+      border-radius: 10px;
+      overflow: hidden;
+      box-shadow: 0 0 10px rgba(0, 180, 216, 0.3);
+    }
+
+    th, td {
+      border: 1px solid rgba(255,255,255,0.1);
+      padding: 8px 10px;
+      text-align: left;
+    }
+
+    th {
+      background: rgba(0, 180, 216, 0.15);
+      color: var(--accent-blue);
+      text-transform: uppercase;
+      font-size: 13px;
+      letter-spacing: 0.5px;
+      position: sticky;
+      top: 0;
+      z-index: 1;
+    }
+
+    tr:hover {
+      background: rgba(255, 255, 255, 0.05);
+    }
+
+    /* === Status Colors === */
+    .ok {
+      color: var(--accent-green);
+      font-weight: bold;
+      text-shadow: 0 0 6px var(--accent-green);
+    }
+
+    .dead {
+      color: #ff4d6d;
+      font-weight: bold;
+      text-shadow: 0 0 6px #ff4d6d;
+    }
+
+    pre {
+      background: #111;
+      padding: 12px;
+      border-radius: 8px;
+      overflow-x: auto;
+      color: var(--accent-green);
+      font-size: 13px;
+    }
+
+    #uploadMsg {
+      margin-left: 10px;
+      color: var(--accent-purple);
+      font-weight: bold;
+    }
+
+    #alerts div {
+      background: rgba(138, 43, 226, 0.1);
+      border-left: 3px solid var(--accent-purple);
+      padding: 6px 10px;
+      margin-bottom: 6px;
+      border-radius: 6px;
+    }
+
+    #alerts div strong {
+      color: var(--accent-blue);
+    }
+
+    #alerts div em {
+      color: var(--accent-green);
+    }
+
+    /* Collapsible section styles */
+    .collapsible {
+      border-radius: 10px;
+      overflow: hidden;
+      background: linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01));
+      margin-top: 10px;
+      border: 1px solid rgba(255,255,255,0.03);
+    }
+
+    .collapsible-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 8px 12px;
+      cursor: pointer;
+      user-select: none;
+    }
+
+    .collapsible-title {
+      font-weight: 700;
+      color: var(--accent-blue);
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .collapsible-toggle {
+      background: transparent;
+      border-radius: 8px;
+      padding: 6px 10px;
+      border: 1px solid rgba(255,255,255,0.04);
+      color: var(--text-light);
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .collapsible-content {
+      max-height: 0;
+      overflow: hidden;
+      transition: max-height 0.35s cubic-bezier(.2,.9,.2,1);
+      padding: 0 12px;
+    }
+
+    .collapsible.expanded .collapsible-content {
+      max-height: 900px; /* large enough to hold table; animated */
+      padding-bottom: 12px;
+      padding-top: 8px;
+    }
+
+    .toggle-arrow {
+      display: inline-block;
+      transition: transform 0.25s ease;
+    }
+
+    .collapsible.expanded .toggle-arrow {
+      transform: rotate(90deg);
+    }
+
+    @keyframes pulseGlow {
+      0% { text-shadow: 0 0 8px rgba(0, 180, 216, 0.5); }
+      50% { text-shadow: 0 0 20px rgba(0, 180, 216, 0.9); }
+      100% { text-shadow: 0 0 8px rgba(0, 180, 216, 0.5); }
+    }
+  </style>
+</head>
+
+<body>
+  <h1>Mini-HDFS Dashboard</h1>
+
+  <div class="card">
+    <h3>📤 Upload File</h3>
+    <form id="uploadForm">
+      <input type="file" name="file" required />
+      <button type="submit">Upload</button>
+      <span id="uploadMsg"></span>
+    </form>
+  </div>
+
+  <div class="row">
+    <div class="card col">
+      <h3>🧩 DataNodes</h3>
+      <div id="datanodes"></div>
+    </div>
+
+    <div class="card col">
+      <h3>📁 Files</h3>
+      <table>
+        <thead>
+          <tr><th>Name</th><th>Size (bytes)</th><th>Chunks</th><th>Action</th></tr>
+        </thead>
+        <tbody id="files"></tbody>
+      </table>
+    </div>
+
+    <div class="card col">
+      <!-- Collapsible chunk map -->
+      <div class="collapsible" id="chunkCollapsible">
+        <div class="collapsible-header" id="chunkHeader" role="button" aria-expanded="true" tabindex="0">
+          <div class="collapsible-title">🧱 Chunk Map</div>
+          <div>
+            <button class="collapsible-toggle" id="chunkToggle" aria-controls="chunkContent" aria-expanded="true">
+              <span class="toggle-arrow">▶</span>
+              <span id="chunkToggleText">Collapse</span>
+            </button>
+          </div>
+        </div>
+
+        <div class="collapsible-content" id="chunkContent" aria-hidden="false">
+          <table>
+            <thead><tr><th>File</th><th>Chunk ID</th><th>Index</th><th>Primary</th><th>Replica</th><th>Stored On</th><th>Checksum</th><th>State</th></tr></thead>
+            <tbody id="chunkmap"></tbody>
+          </table>
+
+          <h4 style="color:var(--accent-purple); margin-top:10px;">⚠ Under-replicated</h4>
+          <table>
+            <thead><tr><th>Chunk ID</th><th>Missing On</th></tr></thead>
+            <tbody id="underrep"></tbody>
+          </table>
+        </div>
+      </div>
+      <!-- end collapsible -->
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>🧠 Metadata (Debug)</h3>
+    <pre id="meta"></pre>
+  </div>
+
+  <div class="card">
+    <h3>🚨 Alerts</h3>
+    <div id="alerts"></div>
+  </div>
+
+<script>
+/* Helper to fetch JSON */
+async function fetchJSON(url){ const r = await fetch(url); return r.json(); }
+
+/* Refresh dashboard data */
+async function refresh(){
+  try {
+    const st = await fetchJSON('/api/status');
+    const d = st.datanode_health || {};
+    const dnEl = document.getElementById('datanodes');
+    dnEl.innerHTML = '';
+    for (const [k,v] of Object.entries(d)){
+      const age = v.last_heartbeat ? (Date.now()/1000 - v.last_heartbeat).toFixed(1) : 'n/a';
+      const cls = v.status === 'alive' ? 'ok' : 'dead';
+      dnEl.innerHTML += `<div><strong>${k}</strong>: <span class="${cls}">${v.status}</span> (last: ${age}s)</div>`;
+    }
+    document.getElementById('meta').textContent = JSON.stringify(st.metadata, null, 2);
+
+    // populate chunk map
+    const cm = document.getElementById('chunkmap');
+    const ur = document.getElementById('underrep');
+    cm.innerHTML = ''; ur.innerHTML = '';
+    if (st.metadata) {
+      for (const [fname, info] of Object.entries(st.metadata)) {
+        for (const ci of info.chunks || []) {
+          const stored = ci.stored_on || [];
+          const primary = ci.primary_datanode || '';
+          const replica = ci.replica_datanode || '';
+          const expected = [primary, replica].filter(Boolean);
+          const missing = expected.filter(x => !stored.includes(x));
+          const state = missing.length === 0 ? '<span class="ok">healthy</span>' : `<span class="dead">under-replicated</span>`;
+          const tr = document.createElement('tr');
+          tr.innerHTML = `<td>${fname}</td><td>${ci.chunk_id}</td><td>${ci.chunk_index}</td><td>${primary}</td><td>${replica}</td><td>${stored.join(', ')}</td><td>${ci.checksum||''}</td><td>${state}</td>`;
+          cm.appendChild(tr);
+          if (missing.length > 0) {
+            const tr2 = document.createElement('tr');
+            tr2.innerHTML = `<td>${ci.chunk_id}</td><td>${missing.join(', ')}</td>`;
+            ur.appendChild(tr2);
+          }
+        }
+      }
+    }
+
+    // alerts
+    const alertsEl = document.getElementById('alerts');
+    alertsEl.innerHTML = '';
+    (st.alerts || []).slice().reverse().forEach(a => {
+      const d = document.createElement('div');
+      const t = a.time || new Date().toISOString();
+      const who = a.chunk_id ? `Chunk ${a.chunk_id}` : '';
+      const msg = a.issue || a.error || a.message || JSON.stringify(a);
+      d.innerHTML = `<strong>${t}</strong> &nbsp; <em>${who}</em> &nbsp; - ${msg}`;
+      alertsEl.appendChild(d);
+    });
+
+    // files
+    const files = await fetchJSON('/api/files');
+    const tbody = document.getElementById('files');
+    tbody.innerHTML = '';
+    (files.files || []).forEach(name => {
+      const meta = st.metadata && st.metadata[name] || {file_size: '?', chunks: []};
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td>${name}</td><td>${meta.file_size}</td><td>${meta.chunks.length}</td>
+      <td><button data-fn="${name}">Download</button></td>`;
+      tbody.appendChild(tr);
+    });
+  } catch (err) {
+    console.error('refresh error', err);
+  }
+}
+
+/* Polling */
+setInterval(refresh, 3000);
+refresh();
+
+/* File download click handler */
+document.getElementById('files').addEventListener('click', async (e)=>{
+  const btn = e.target.closest('button');
+  if(!btn) return;
+  const fn = btn.getAttribute('data-fn');
+  const a = document.createElement('a');
+  a.href = `/api/download/${encodeURIComponent(fn)}`;
+  a.click();
+});
+
+/* Upload form */
+document.getElementById('uploadForm').addEventListener('submit', async (e)=>{
+  e.preventDefault();
+  const form = e.target;
+  const fd = new FormData(form);
+  const msg = document.getElementById('uploadMsg');
+  msg.textContent = 'Uploading...';
+  try{
+    const r = await fetch('/api/upload', { method: 'POST', body: fd });
+    const j = await r.json();
+    msg.textContent = j.status === 'success' ? '✅ Uploaded!' : ('❌ Error: ' + (j.message||'unknown'));
+  }catch(err){
+    msg.textContent = '❌ Error: ' + err.message;
+  }
+  refresh();
+});
+
+/* Collapsible chunk map logic */
+const chunkCollapsible = document.getElementById('chunkCollapsible');
+const chunkHeader = document.getElementById('chunkHeader');
+const chunkToggle = document.getElementById('chunkToggle');
+const chunkToggleText = document.getElementById('chunkToggleText');
+const chunkContent = document.getElementById('chunkContent');
+
+function setExpanded(expanded) {
+  if (expanded) {
+    chunkCollapsible.classList.add('expanded');
+    chunkHeader.setAttribute('aria-expanded', 'true');
+    chunkToggle.setAttribute('aria-expanded', 'true');
+    chunkContent.setAttribute('aria-hidden', 'false');
+    chunkToggleText.textContent = 'Collapse';
+  } else {
+    chunkCollapsible.classList.remove('expanded');
+    chunkHeader.setAttribute('aria-expanded', 'false');
+    chunkToggle.setAttribute('aria-expanded', 'false');
+    chunkContent.setAttribute('aria-hidden', 'true');
+    chunkToggleText.textContent = 'Expand';
+  }
+}
+
+/* default expanded */
+setExpanded(true);
+
+chunkHeader.addEventListener('click', ()=> setExpanded(!chunkCollapsible.classList.contains('expanded')));
+chunkHeader.addEventListener('keypress', (e)=> { if(e.key === 'Enter' || e.key === ' ') { setExpanded(!chunkCollapsible.classList.contains('expanded')); e.preventDefault(); }});
+</script>
+</body>
+</html>
