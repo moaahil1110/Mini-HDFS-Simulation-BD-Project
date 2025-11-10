@@ -10,7 +10,7 @@ import signal
 import config
 from protocol import send_json, recv_json
 
-# logging
+# -------------------- Logging --------------------
 logger = logging.getLogger('datanode1')
 logger.setLevel(logging.INFO)
 fh = logging.FileHandler('datanode1.log')
@@ -26,20 +26,26 @@ class Datanode1:
     """
 
     def __init__(self):
+        # --- endpoints / config ---
         self.host = config.DATANODE1_HOST
-        self.port = config.DATANODE1_PORT
+        self.port = int(config.DATANODE1_PORT)
         self.storagedir = config.DATANODE1_STORAGE_DIR
-        self.namenodehost = config.NAMENODE_HOST
-        self.namenodeheartbeatport = config.NAMENODE_HEARTBEAT_PORT
-        self.heartbeatinterval = config.HEARTBEAT_INTERVAL
 
+        self.namenode_host = config.NAMENODE_HOST
+        self.namenode_hb_port = int(config.NAMENODE_HEARTBEAT_PORT)
+
+        self.heartbeat_interval = int(getattr(config, 'HEARTBEAT_INTERVAL', 5))
+
+        # --- state ---
         os.makedirs(self.storagedir, exist_ok=True)
-        self.chunks = {}
+        self.chunks = {}  # {chunk_id: {"size": int, "checksum": str}}
         self._load_chunks()
+
         # graceful shutdown
         self.stop_event = threading.Event()
         self.server = None
 
+    # ---------- persistence ----------
     def _chunks_path(self):
         return os.path.join(self.storagedir, 'chunks.json')
 
@@ -49,8 +55,11 @@ class Datanode1:
             try:
                 with open(p, 'r', encoding='utf-8') as f:
                     self.chunks = json.load(f)
-            except:
+            except Exception:
+                logger.exception("Failed to load chunks.json; starting empty")
                 self.chunks = {}
+        else:
+            self.chunks = {}
 
     def _save_chunks(self):
         p = self._chunks_path()
@@ -61,77 +70,161 @@ class Datanode1:
             os.fsync(f.fileno())
         os.replace(tmp, p)
 
-    def calculate_checksum(self, data):
+    # ---------- utils ----------
+    @staticmethod
+    def calculate_checksum(data: bytes) -> str:
         return hashlib.md5(data).hexdigest()
 
     # ---------- heartbeat ----------
-    def send_heartbeat(self):
-        while not getattr(self, 'stop_event', threading.Event()).is_set():
+    def _send_heartbeat_once(self):
+        sock = None
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(5)
+            sock.connect((self.namenode_host, self.namenode_hb_port))
+            hb = {
+                'datanode_id': 'datanode1',
+                'timestamp': time.time(),
+                'chunks_stored': len(self.chunks),
+                # help the NameNode dynamic registry:
+                'host': self.host,
+                'port': self.port,
+            }
+            send_json(sock, hb)
+        except Exception:
+            logger.debug("Heartbeat send failed", exc_info=True)
+        finally:
             try:
-                # Log heartbeat being sent
-                logger.debug(f"Sending heartbeat to {self.namenodehost}:{self.namenodeheartbeatport} (chunks={len(self.chunks)})")
-                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.connect((self.namenodehost, self.namenodeheartbeatport))
-                hb = {'datanode_id': 'datanode1', 'timestamp': time.time(), 'chunks_stored': len(self.chunks)}
-                send_json(sock, hb)
-                sock.close()
-            except:
-                logger.warning("Heartbeat send failed")
-            time.sleep(self.heartbeatinterval)
+                if sock:
+                    sock.close()
+            except Exception:
+                pass
+
+    def send_heartbeat(self):
+        while not self.stop_event.is_set():
+            self._send_heartbeat_once()
+            time.sleep(self.heartbeat_interval)
 
     def start_heartbeat(self):
-        threading.Thread(target=self.send_heartbeat, daemon=True).start()
+        threading.Thread(target=self.send_heartbeat, daemon=True, name="Heartbeat").start()
 
     # ---------- actions ----------
     def handle_store_chunk(self, request, clientsocket):
+        """
+        Robust store:
+        - handshake READY
+        - exact-size receive with timeout
+        - atomic write via .tmp + os.replace
+        - strict short-read rejection with clean JSON error
+        - correct filename extraction (<filename>_chunk<i>)
+        """
         chunkid = request['chunk_id']
         chunksize = int(request['chunk_size'])
         logger.info(f"STORE request received for {chunkid} size={chunksize}")
-        # handshake:
-        clientsocket.sendall(b'READY')
 
-        data = b''
-        while len(data) < chunksize:
-            packet = clientsocket.recv(min(8192, chunksize - len(data)))
-            if not packet:
-                break
-            data += packet
+        # I/O timeout
+        clientsocket.settimeout(30)
 
-        checksum = self.calculate_checksum(data)
-        with open(os.path.join(self.storagedir, chunkid), 'wb') as f:
-            f.write(data)
+        # handshake to sender
+        try:
+            clientsocket.sendall(b'READY')
+        except Exception as e:
+            logger.error(f"Failed to send READY for {chunkid}: {e}")
+            try:
+                send_json(clientsocket, {'status': 'error', 'message': str(e)})
+            except Exception:
+                pass
+            return
 
-        self.chunks[chunkid] = {'size': len(data), 'checksum': checksum}
+        final_path = os.path.join(self.storagedir, chunkid)
+        tmp_path = final_path + ".tmp"
+
+        remaining = chunksize
+        hasher = hashlib.md5()
+
+        try:
+            with open(tmp_path, 'wb') as f:
+                while remaining > 0:
+                    packet = clientsocket.recv(min(65536, remaining))
+                    if not packet:
+                        # Peer closed early -> short read (reject)
+                        raise RuntimeError(f"short read: expected {remaining} more bytes")
+                    f.write(packet)
+                    hasher.update(packet)
+                    remaining -= len(packet)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, final_path)
+        except Exception as e:
+            # cleanup temp on any failure
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except Exception:
+                pass
+            # tell the sender cleanly, then return
+            logger.error(f"STORE failed for {chunkid}: {e}")
+            try:
+                send_json(clientsocket, {'status': 'error', 'message': str(e)})
+            except Exception:
+                pass
+            return
+
+        checksum = hasher.hexdigest()
+
+        # record meta
+        self.chunks[chunkid] = {'size': chunksize, 'checksum': checksum}
         self._save_chunks()
 
-        logger.info(f"Stored chunk {chunkid} size={len(data)} checksum={checksum}")
-        send_json(clientsocket, {
-            'status': 'success',
+        logger.info(f"Stored chunk {chunkid} size={chunksize} checksum={checksum}")
+
+        # ACK to sender
+        try:
+            send_json(clientsocket, {
+                'status': 'success',
+                'chunk_id': chunkid,
+                'checksum': checksum,
+                'chunk_size': chunksize
+            })
+        except Exception:
+            # if ACK fails, we still persist the chunk; sender may retry report
+            logger.debug(f"Failed sending final ACK for {chunkid}", exc_info=True)
+
+        # ---- Report to NameNode (correct filename extraction) ----
+        # chunk_id is "<filename>_chunk<i>" → split EXACTLY on "_chunk"
+        fn = chunkid.split('_chunk', 1)[0]
+
+        report_msg = {
+            'command': 'report_chunk',
+            'filename': fn,  # correct (no trailing underscore)
             'chunk_id': chunkid,
+            'datanode_id': 'datanode1',
             'checksum': checksum,
-            'chunk_size': len(data)
-        })
-        # report to Namenode so it can persist checksum and 'stored_on' (retry a few times)
-        fn = chunkid.rsplit('chunk', 1)[0]
-        report_msg = {'command': 'report_chunk', 'filename': fn, 'chunk_id': chunkid, 'datanode_id': 'datanode1', 'checksum': checksum, 'chunk_size': len(data)}
-        # increase retries and timeout to improve reliability in noisy test runs
+            'chunk_size': chunksize,
+        }
+
         for attempt in range(1, 7):
+            s = None
             try:
-                logger.debug(f"Reporting chunk {chunkid} to Namenode (attempt {attempt})")
+                logger.debug(f"Reporting chunk {chunkid} to NameNode (attempt {attempt})")
                 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 s.settimeout(8)
                 s.connect((config.NAMENODE_HOST, config.NAMENODE_PORT))
                 send_json(s, report_msg)
                 resp = recv_json(s)
-                s.close()
                 if resp.get('status') == 'success':
-                    logger.info(f"Reported chunk {chunkid} to Namenode (attempt {attempt})")
+                    logger.info(f"Reported chunk {chunkid} to NameNode (attempt {attempt})")
                     break
                 else:
-                    logger.warning(f"Namenode rejected report for {chunkid} (attempt {attempt}): {resp}")
+                    logger.warning(f"NameNode rejected report for {chunkid} (attempt {attempt}): {resp}")
             except Exception:
-                logger.exception(f'Failed to report chunk {chunkid} to Namenode (attempt {attempt})')
-            # exponential backoff
+                logger.exception(f"Failed to report chunk {chunkid} to NameNode (attempt {attempt})")
+            finally:
+                try:
+                    if s:
+                        s.close()
+                except Exception:
+                    pass
             time.sleep(min(5, 0.5 * (2 ** (attempt - 1))))
 
     def handle_retrieve_chunk(self, request, clientsocket):
@@ -142,27 +235,44 @@ class Datanode1:
             return
 
         path = os.path.join(self.storagedir, chunkid)
-        with open(path, 'rb') as f:
-            chunkdata = f.read()
+        if not os.path.exists(path):
+            send_json(clientsocket, {'status': 'error', 'message': 'Chunk file missing'})
+            return
+
+        try:
+            with open(path, 'rb') as f:
+                chunkdata = f.read()
+        except Exception as e:
+            send_json(clientsocket, {'status': 'error', 'message': f'IO error: {e}'})
+            return
 
         checksum = self.calculate_checksum(chunkdata)
-        if checksum != meta['checksum']:
+        if checksum != meta.get('checksum'):
             send_json(clientsocket, {'status': 'error', 'message': 'Checksum failed'})
             return
+
         # send header
         logger.info(f"RETRIEVE request for {chunkid}, sending header chunk_size={len(chunkdata)}")
-        send_json(clientsocket, {'status': 'success', 'chunk_size': len(chunkdata), 'checksum': checksum})
-
-        # wait ack
-        _ = clientsocket.recv(3)
-        logger.info(f"ACK received for {chunkid}, streaming bytes...")
+        try:
+            send_json(clientsocket, {'status': 'success', 'chunk_size': len(chunkdata), 'checksum': checksum})
+            # wait ack
+            clientsocket.settimeout(15)
+            _ = clientsocket.recv(3)  # 'ACK'
+        except Exception as e:
+            logger.error(f"retrieve header/ack failed for {chunkid}: {e}")
+            return
 
         # stream bytes
-        clientsocket.sendall(chunkdata)
-        logger.info(f"Finished streaming {len(chunkdata)} bytes for {chunkid}")
-
-    def handle_client(self, clientsocket, _):
         try:
+            clientsocket.sendall(chunkdata)
+            logger.info(f"Finished streaming {len(chunkdata)} bytes for {chunkid}")
+        except Exception as e:
+            logger.error(f"stream failed for {chunkid}: {e}")
+
+    # ---------- server plumbing ----------
+    def handle_client(self, clientsocket, _addr):
+        try:
+            clientsocket.settimeout(30)
             request = recv_json(clientsocket)
             action = request.get('action')
 
@@ -173,12 +283,17 @@ class Datanode1:
             else:
                 send_json(clientsocket, {'status': 'error', 'message': 'Unknown action'})
         except Exception as e:
+            # Clean, no stacktrace dump to stdout
             try:
                 send_json(clientsocket, {'status': 'error', 'message': str(e)})
-            except:
+            except Exception:
                 pass
+            logger.error(f"Client handler error: {e}")
         finally:
-            clientsocket.close()
+            try:
+                clientsocket.close()
+            except Exception:
+                pass
 
     def run(self):
         self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -215,10 +330,13 @@ class Datanode1:
         except Exception:
             logger.exception('Exception during datanode1 shutdown')
 
+
 if __name__ == '__main__':
     dn = Datanode1()
+
     def _sig(signum, frame):
         dn.shutdown()
+
     signal.signal(signal.SIGINT, _sig)
     signal.signal(signal.SIGTERM, _sig)
     dn.run()
