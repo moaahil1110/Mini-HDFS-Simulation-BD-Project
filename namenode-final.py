@@ -177,7 +177,7 @@ class Namenode:
         logger.info(f"Handling failure of {dead_dnid} - checking for chunks that need re-replication")
         
         with self.lock:
-            failed_chunks = []
+            under_replicated_count = 0
             for fname, info in self.metadata.items():
                 for ci in info['chunks']:
                     chunk_id = ci['chunk_id']
@@ -186,8 +186,8 @@ class Namenode:
                     # Check if this chunk is stored on the dead node
                     if dead_dnid in stored:
                         # Remove dead node from stored_on list
-                        if dead_dnid in stored:
-                            stored.remove(dead_dnid)
+                        stored.remove(dead_dnid)
+                        ci['stored_on'] = stored
                         
                         # Find the alive node that has this chunk
                         alive_nodes = [n for n in self.datanode_health.keys() if n in stored and self.datanode_health[n]['status'] == 'alive']
@@ -199,6 +199,7 @@ class Namenode:
                                 ci['under_replicated'] = []
                             if dead_dnid not in ci['under_replicated']:
                                 ci['under_replicated'].append(dead_dnid)
+                                under_replicated_count += 1
                                 logger.warning(f"Chunk {chunk_id} is now under-replicated (only on {alive_nodes[0]}) due to {dead_dnid} failure")
                         elif len(alive_nodes) == 0:
                             # This should never happen in 2-node system, but handle it
@@ -206,7 +207,7 @@ class Namenode:
             
             # Save updated metadata
             self.save_metadata()
-            logger.info(f"Marked chunks as under-replicated after {dead_dnid} failure")
+            logger.info(f"FAILURE HANDLING COMPLETE: {under_replicated_count} chunks marked as under-replicated after {dead_dnid} failure")
 
     # ---------- client RPC handlers ----------
     def handle_client(self, client_socket):
@@ -398,7 +399,6 @@ class Namenode:
             tgt = dn_info.get(target)
             if not src or not tgt:
                 logger.error(f'Invalid replication task {task}, skipping')
-                self._save_repl_queue()
                 continue
 
             success = False
@@ -472,7 +472,6 @@ class Namenode:
                     with self.lock:
                         self.alerts.append({'chunk_id': chunk_id, 'target': target, 'error': 'replication_failed', 'time': datetime.now().isoformat()})
 
-            self._save_repl_queue()
             time.sleep(0.1)
 
     # ---------- replication helpers ----------
@@ -491,19 +490,49 @@ class Namenode:
 
         with self.lock:
             to_replicate = []
+            debug_info = []
+            
             for fname, info in self.metadata.items():
                 for ci in info['chunks']:
                     # Check if this chunk needs to be restored on target_dnid
                     stored = ci.get('stored_on', [])
                     under_replicated = ci.get('under_replicated', [])
                     
+                    # Debug: Log chunk status
+                    chunk_id = ci['chunk_id']
+                    primary = ci['primary_datanode']
+                    replica = ci['replica_datanode']
+                    
                     # Case 1: Target is expected to have this chunk but doesn't
-                    if (ci['primary_datanode'] == target_dnid or ci['replica_datanode'] == target_dnid) and target_dnid not in stored:
-                        to_replicate.append({'chunk_id': ci['chunk_id'], 'chunk_meta': ci})
+                    if (primary == target_dnid or replica == target_dnid) and target_dnid not in stored:
+                        to_replicate.append({'chunk_id': chunk_id, 'chunk_meta': ci})
+                        debug_info.append(f"REBUILD: {chunk_id} - expected on {target_dnid} but not in stored_on: {stored}")
                     
                     # Case 2: Chunk was marked as under-replicated due to target_dnid failure
                     elif target_dnid in under_replicated:
-                        to_replicate.append({'chunk_id': ci['chunk_id'], 'chunk_meta': ci})
+                        to_replicate.append({'chunk_id': chunk_id, 'chunk_meta': ci})
+                        debug_info.append(f"REBUILD: {chunk_id} - marked under_replicated, target: {target_dnid}")
+
+            # Log debug info
+            for debug_msg in debug_info:
+                logger.info(debug_msg)
+            
+            logger.info(f"Found {len(to_replicate)} chunks to rebuild on {target_dnid}")
+            
+            if len(to_replicate) == 0:
+                logger.warning("NO CHUNKS FOUND FOR REBUILD! This might indicate:")
+                logger.warning("1. stored_on list wasn't updated when node failed")
+                logger.warning("2. under_replicated tracking not working")
+                logger.warning("3. Node already has all expected chunks")
+                
+                # Check each chunk manually
+                for fname, info in self.metadata.items():
+                    for ci in info['chunks']:
+                        chunk_id = ci['chunk_id']
+                        stored = ci.get('stored_on', [])
+                        primary = ci['primary_datanode']
+                        replica = ci['replica_datanode']
+                        logger.warning(f"DEBUG {chunk_id}: primary={primary}, replica={replica}, stored_on={stored}, target_dnid={target_dnid}")
 
         logger.info(f"Found {len(to_replicate)} chunks to rebuild on {target_dnid}")
 
@@ -540,8 +569,6 @@ class Namenode:
         
         # Save updated metadata
         self.save_metadata()
-        logger.info(f"Rebuild complete: enqueued {len(to_replicate)} chunks for {target_dnid}")
-        
         logger.info(f"Rebuild complete: enqueued {len(to_replicate)} chunks for {target_dnid}")
 
     def periodic_replication_check(self):
