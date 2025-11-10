@@ -185,49 +185,28 @@ class Namenode:
                     
                     # Check if this chunk is stored on the dead node
                     if dead_dnid in stored:
-                        # Find alive nodes that should have this chunk
-                        expected_replicas = [ci['primary_datanode'], ci['replica_datanode']]
+                        # Remove dead node from stored_on list
+                        if dead_dnid in stored:
+                            stored.remove(dead_dnid)
                         
-                        # Find which replicas are still alive
-                        alive_replicas = []
-                        for replica in expected_replicas:
-                            if replica != dead_dnid and replica in self.datanode_health:
-                                if self.datanode_health[replica]['status'] == 'alive':
-                                    alive_replicas.append(replica)
+                        # Find the alive node that has this chunk
+                        alive_nodes = [n for n in self.datanode_health.keys() if n in stored and self.datanode_health[n]['status'] == 'alive']
                         
-                        # If we have at least one alive replica, find a target for re-replication
-                        if len(alive_replicas) >= 1:
-                            # Use the other expected replica as target if it's alive, otherwise use the alive replica
-                            target = None
-                            for expected in expected_replicas:
-                                if expected != dead_dnid and expected not in stored and expected in self.datanode_health:
-                                    if self.datanode_health[expected]['status'] == 'alive':
-                                        target = expected
-                                        break
-                            
-                            # If target is not the expected replica, pick any alive node that's not the source
-                            if not target:
-                                for replica in alive_replicas:
-                                    if replica not in stored:
-                                        target = replica
-                                        break
-                            
-                            if target:
-                                # Use the first alive replica as source
-                                source = alive_replicas[0]
-                                failed_chunks.append({
-                                    'chunk_id': chunk_id,
-                                    'source': source,
-                                    'target': target,
-                                    'reason': f'primary_replica_{dead_dnid}_failed'
-                                })
-                                logger.info(f"Chunk {chunk_id} lost replica on {dead_dnid}, will re-replicate from {source} to {target}")
-        
-        # Enqueue replication tasks for all failed chunks
-        for task in failed_chunks:
-            self.enqueue_replication(task['chunk_id'], task['source'], task['target'])
-        
-        logger.info(f"Enqueued {len(failed_chunks)} chunks for re-replication after {dead_dnid} failure")
+                        # For 2-node system: mark chunk as under-replicated
+                        if len(alive_nodes) == 1:
+                            # Chunk is now only on one node (under-replicated)
+                            if 'under_replicated' not in ci:
+                                ci['under_replicated'] = []
+                            if dead_dnid not in ci['under_replicated']:
+                                ci['under_replicated'].append(dead_dnid)
+                                logger.warning(f"Chunk {chunk_id} is now under-replicated (only on {alive_nodes[0]}) due to {dead_dnid} failure")
+                        elif len(alive_nodes) == 0:
+                            # This should never happen in 2-node system, but handle it
+                            logger.error(f"Chunk {chunk_id} has NO replicas! Critical data loss!")
+            
+            # Save updated metadata
+            self.save_metadata()
+            logger.info(f"Marked chunks as under-replicated after {dead_dnid} failure")
 
     # ---------- client RPC handlers ----------
     def handle_client(self, client_socket):
@@ -514,12 +493,16 @@ class Namenode:
             to_replicate = []
             for fname, info in self.metadata.items():
                 for ci in info['chunks']:
-                    # only enqueue if target is expected to have the chunk
-                    if ci['primary_datanode'] == target_dnid or ci['replica_datanode'] == target_dnid:
-                        # if stored_on already records target, skip
-                        stored = ci.get('stored_on', [])
-                        if target_dnid in stored:
-                            continue
+                    # Check if this chunk needs to be restored on target_dnid
+                    stored = ci.get('stored_on', [])
+                    under_replicated = ci.get('under_replicated', [])
+                    
+                    # Case 1: Target is expected to have this chunk but doesn't
+                    if (ci['primary_datanode'] == target_dnid or ci['replica_datanode'] == target_dnid) and target_dnid not in stored:
+                        to_replicate.append({'chunk_id': ci['chunk_id'], 'chunk_meta': ci})
+                    
+                    # Case 2: Chunk was marked as under-replicated due to target_dnid failure
+                    elif target_dnid in under_replicated:
                         to_replicate.append({'chunk_id': ci['chunk_id'], 'chunk_meta': ci})
 
         logger.info(f"Found {len(to_replicate)} chunks to rebuild on {target_dnid}")
@@ -546,8 +529,18 @@ class Namenode:
                 logger.warning(f"No known source (per metadata.stored_on) for {chunk_id}; skipping enqueue")
                 continue
 
-            logger.info(f"Rebuilding chunk {chunk_id} from {source} to {target_dnid} (expected replica location)")
+            logger.info(f"RE-REPLICATION SUCCESS: Restoring chunk {chunk_id} from {source} to {target_dnid}")
             self.enqueue_replication(chunk_id, source, target_dnid)
+            
+            # Remove from under_replicated list once enqueued
+            if 'under_replicated' in ci and target_dnid in ci['under_replicated']:
+                ci['under_replicated'].remove(target_dnid)
+                if not ci['under_replicated']:
+                    del ci['under_replicated']
+        
+        # Save updated metadata
+        self.save_metadata()
+        logger.info(f"Rebuild complete: enqueued {len(to_replicate)} chunks for {target_dnid}")
         
         logger.info(f"Rebuild complete: enqueued {len(to_replicate)} chunks for {target_dnid}")
 
