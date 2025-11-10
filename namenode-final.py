@@ -401,6 +401,29 @@ class Namenode:
                 logger.error(f'Invalid replication task {task}, skipping')
                 continue
 
+            # Pre-flight check: Skip if target already has this chunk
+            with self.lock:
+                chunk_found = False
+                target_already_has_chunk = False
+                for fname, info in self.metadata.items():
+                    for ci in info['chunks']:
+                        if ci['chunk_id'] == chunk_id:
+                            chunk_found = True
+                            stored = ci.get('stored_on', [])
+                            if target in stored:
+                                target_already_has_chunk = True
+                                logger.info(f"Skipping replication of {chunk_id} to {target} - target already has this chunk")
+                            break
+                    if chunk_found:
+                        break
+                
+                if not chunk_found:
+                    logger.warning(f"Chunk {chunk_id} not found in metadata, skipping replication")
+                    continue
+                
+                if target_already_has_chunk:
+                    continue
+
             success = False
             try:
                 # retrieve from source
@@ -603,14 +626,16 @@ class Namenode:
                                 # If we have sources and missing replicas, schedule re-replication
                                 if stored and missing_replicas:
                                     for target in missing_replicas:
-                                        source = stored[0]  # Use first available replica as source
-                                        under_replicated.append({
-                                            'chunk_id': chunk_id,
-                                            'source': source,
-                                            'target': target,
-                                            'reason': 'under_replicated'
-                                        })
-                                        logger.info(f"Chunk {chunk_id} under-replicated ({len(stored)}/2 replicas), will re-replicate from {source} to {target}")
+                                        # Double-check: only enqueue if target is not already in stored
+                                        if target not in stored:
+                                            source = stored[0]  # Use first available replica as source
+                                            under_replicated.append({
+                                                'chunk_id': chunk_id,
+                                                'source': source,
+                                                'target': target,
+                                                'reason': 'under_replicated'
+                                            })
+                                            logger.info(f"Chunk {chunk_id} under-replicated ({len(stored)}/2 replicas), will re-replicate from {source} to {target}")
                 
                 # Enqueue replication tasks
                 for task in under_replicated:
