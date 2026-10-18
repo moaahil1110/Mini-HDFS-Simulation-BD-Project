@@ -6,3 +6,7 @@ Q&A-datanode1.md
 __pycache__/
 .pytest_cache/
 .ruff_cache/
+
+# Runtime output (uploads, logs)
+uploads/
+*.log
