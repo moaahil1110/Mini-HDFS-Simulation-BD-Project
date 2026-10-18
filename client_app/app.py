@@ -3,6 +3,8 @@ import socket
 import os
 import traceback
 
+from werkzeug.utils import secure_filename
+
 import config
 from protocol import send_json, recv_json
 
@@ -136,11 +138,16 @@ def upload():
         if 'file' not in request.files:
             return jsonify({'status': 'error', 'message': 'no file part in request'}), 400
         file = request.files['file']
+        # Sanitize the name: it is used as a local path here and becomes part of
+        # the chunk IDs that Datanodes join onto their storage directory.
+        filename = secure_filename(file.filename or '')
+        if not filename:
+            return jsonify({'status': 'error', 'message': 'invalid filename'}), 400
         os.makedirs(config.UPLOAD_DIR, exist_ok=True)
-        path = os.path.join(config.UPLOAD_DIR, file.filename)
+        path = os.path.join(config.UPLOAD_DIR, filename)
         file.save(path)
 
-        result = client.upload_file(path, file.filename)
+        result = client.upload_file(path, filename)
 
         try:
             os.remove(path)
@@ -187,5 +194,6 @@ def status():
 
 
 if __name__ == '__main__':
-    # Debug = True for seeing errors clearly in terminal
-    app.run(host=config.CLIENT_HOST, port=config.CLIENT_PORT, debug=True)
+    # Never enable debug here: the Werkzeug debugger allows remote code execution
+    # and the app binds to all interfaces.
+    app.run(host=config.CLIENT_HOST, port=config.CLIENT_PORT, debug=False)

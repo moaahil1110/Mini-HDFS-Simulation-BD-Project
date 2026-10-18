@@ -1,3 +1,12 @@
 # Gemini-generated files
 stuff.md
 Q&A-datanode1.md
+# Local virtualenv / caches
+.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+
+# Runtime output (uploads, logs)
+uploads/
+*.log
